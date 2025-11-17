@@ -160,7 +160,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          lcov --capture --directory build --output-file coverage.info
+          lcov --capture --directory build --output-file coverage.info --gcov-tool /usr/bin/gcov-14 --ignore-errors mismatch
           lcov --remove coverage.info \
             '/usr/*' \
             '*/build/_deps/*' \
