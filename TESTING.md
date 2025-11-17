@@ -10,7 +10,7 @@ cmake -B build -DASIO_STANDALONE=ON -DBUILD_TESTS=ON
 cmake --build build
 
 # Run all tests
-./build/tests/alenats_tests
+ctest --test-dir build
 
 # Run specific tests
 ./build/tests/alenats_tests "ConnectionPool*"

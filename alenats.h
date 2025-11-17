@@ -102,6 +102,17 @@ namespace Nats {
         const auto bytes = std::as_bytes(std::span{s});
         return Nats::Buffer(bytes.begin(), bytes.end());
     }
+
+    /**
+     * @brief Zero-copy view of the buffer as a string.
+     * The view is only valid as long as the buffer exists.
+     */
+    inline std::string_view view_string(const Buffer& buffer) {
+        return std::string_view(
+            reinterpret_cast<const char*>(buffer.data()), 
+            buffer.size()
+        );
+    }
     
     /**
      * @class Subscription

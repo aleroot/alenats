@@ -58,18 +58,12 @@ public:
     std::map<std::string, std::string> last_headers;
 };
 
-/**
- * Convert string to buffer
- */
-inline Nats::Buffer to_buffer(std::string_view str) {
-    return Nats::to_buffer(str);
-}
+using Nats::to_buffer;
 
 /**
- * Convert buffer to string
+ * Convert buffer to string (for test assertions)
  */
 inline std::string to_string(const Nats::Buffer& buffer) {
-    return std::string(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+    return std::string(Nats::view_string(buffer));
 }
-
 } // namespace TestHelpers
