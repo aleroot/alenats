@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ASIO_STANDALONE "Build with standalone Asio instead of Boost.Asio" OFF)
+option(BUILD_TESTS "Build test suite" ON)
+option(ENABLE_COVERAGE "Enable code coverage" OFF)
 
 find_package(OpenSSL REQUIRED)
 include(FetchContent)
@@ -51,5 +53,16 @@ else()
     target_link_libraries(alenats PUBLIC ${Boost_LIBRARIES})
 endif()
 
+# Enable coverage if requested
+if(ENABLE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(alenats PUBLIC --coverage -fprofile-arcs -ftest-coverage)
+    target_link_options(alenats PUBLIC --coverage)
+endif()
 
 add_subdirectory(examples)
+
+# Add tests if enabled
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

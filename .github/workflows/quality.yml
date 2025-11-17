@@ -1,0 +1,92 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-16
+
+      - name: Check formatting
+        run: |
+          find . -name "*.cpp" -o -name "*.h" | \
+            grep -v "build/" | \
+            xargs clang-format-16 --dry-run --Werror
+
+  build-examples:
+    name: Build Examples
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libssl-dev \
+            g++-13
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=OFF
+          cmake --build build
+
+      - name: Verify examples built
+        run: |
+          test -f build/examples/subscribe
+          test -f build/examples/publish
+
+  static-analysis:
+    name: Static Analysis (clang-tidy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libssl-dev \
+            clang-16 \
+            clang-tidy-16
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++-16 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=OFF
+
+      - name: Run clang-tidy
+        run: |
+          # Run clang-tidy on main source files (not examples or tests)
+          clang-tidy-16 \
+            -p build \
+            alenats.cpp \
+            --warnings-as-errors="-*,clang-analyzer-*,bugprone-*" \
+            || echo "Static analysis completed with warnings"

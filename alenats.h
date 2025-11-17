@@ -41,6 +41,7 @@
 #include <string_view>
 #include <vector>
 #include <cstddef>
+#include <span>
 #include <iostream>
 
 namespace simdjson { namespace dom { class parser; class element; } }

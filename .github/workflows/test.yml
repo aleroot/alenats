@@ -1,0 +1,170 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test-ubuntu:
+    name: Ubuntu Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++-13, clang-16]
+        asio_mode: [standalone, boost]
+        include:
+          - compiler: g++-13
+            cxx_compiler: g++-13
+            c_compiler: gcc-13
+          - compiler: clang-16
+            cxx_compiler: clang++-16
+            c_compiler: clang-16
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libssl-dev \
+            ${{ matrix.compiler }}
+
+      - name: Install Boost (if needed)
+        if: matrix.asio_mode == 'boost'
+        run: |
+          sudo apt-get install -y libboost-system-dev
+
+      - name: Configure CMake (Standalone Asio)
+        if: matrix.asio_mode == 'standalone'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }} \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=ON
+
+      - name: Configure CMake (Boost.Asio)
+        if: matrix.asio_mode == 'boost'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }} \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=OFF \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure --verbose
+
+  test-macos:
+    name: macOS Tests
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        asio_mode: [standalone, boost]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja openssl@3
+
+      - name: Install Boost (if needed)
+        if: matrix.asio_mode == 'boost'
+        run: |
+          brew install boost
+
+      - name: Configure CMake (Standalone Asio)
+        if: matrix.asio_mode == 'standalone'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+
+      - name: Configure CMake (Boost.Asio)
+        if: matrix.asio_mode == 'boost'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=OFF \
+            -DBUILD_TESTS=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure --verbose
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libssl-dev \
+            g++-13 \
+            lcov
+
+      - name: Configure CMake with coverage
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=ON \
+            -DENABLE_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory build --output-file coverage.info
+          lcov --remove coverage.info \
+            '/usr/*' \
+            '*/build/_deps/*' \
+            '*/tests/*' \
+            --output-file coverage.filtered.info
+          lcov --list coverage.filtered.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.filtered.info
+          fail_ci_if_error: false
+          verbose: true
