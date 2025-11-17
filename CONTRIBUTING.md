@@ -29,13 +29,70 @@ Thank you for considering contributing to AleNats! This document provides guidel
 
 ### Initial Setup
 
+#### Ubuntu/Debian
+
 ```bash
+# Install dependencies
+sudo apt-get update
+sudo apt-get install -y cmake ninja-build libssl-dev g++-13
+
 # Clone the repository
-git clone https://github.com/bjcoombs/alenats.git
+git clone https://github.com/aleroot/alenats.git
 cd alenats
 
 # Build with standalone Asio (recommended for development)
-cmake -B build -DASIO_STANDALONE=ON -DCMAKE_BUILD_TYPE=Debug
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13 \
+    -DASIO_STANDALONE=ON -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+cmake --build build
+
+# Run tests
+./build/tests/alenats_tests
+
+# Run examples
+./build/examples/subscribe &
+./build/examples/publish
+```
+
+#### OpenSUSE (Tumbleweed/Leap)
+
+```bash
+# Install dependencies
+sudo zypper install -y cmake ninja gcc13 gcc13-c++ libopenssl-3-devel
+
+# For Boost.Asio variant (optional)
+sudo zypper install -y boost-devel
+
+# Clone the repository
+git clone https://github.com/aleroot/alenats.git
+cd alenats
+
+# Build with standalone Asio
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13 \
+    -DASIO_STANDALONE=ON -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+cmake --build build
+
+# Run tests
+./build/tests/alenats_tests
+
+# Run examples
+./build/examples/subscribe &
+./build/examples/publish
+```
+
+#### macOS
+
+```bash
+# Install dependencies
+brew install cmake ninja openssl@3
+
+# Clone the repository
+git clone https://github.com/aleroot/alenats.git
+cd alenats
+
+# Build with standalone Asio
+cmake -B build -G Ninja \
+    -DASIO_STANDALONE=ON -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
+    -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 cmake --build build
 
 # Run tests
