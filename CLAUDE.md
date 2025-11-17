@@ -18,8 +18,8 @@ AleNats is a high-performance, asynchronous NATS client for C++23, built on Asio
 **IMPORTANT:** Before proposing significant changes, consult the ADR directory.
 
 ADRs document both what we chose AND what we rejected (with reasoning):
-- **Location:** `alenats-main/docs/adr/`
-- **Index:** See `alenats-main/docs/adr/README.md` for complete catalog
+- **Location:** `docs/adr/`
+- **Index:** See `docs/adr/README.md` for complete catalog
 - **Format:** YAML frontmatter with tags for searchability
 
 **When to reference ADRs:**
@@ -29,7 +29,7 @@ ADRs document both what we chose AND what we rejected (with reasoning):
 - Understanding context behind technical decisions
 
 **Current ADRs:**
-- [ADR-0001: Testing Infrastructure](alenats-main/docs/adr/0001-testing-infrastructure.md)
+- [ADR-0001: Testing Infrastructure](docs/adr/0001-testing-infrastructure.md)
   - Tags: testing, ci-cd, quality, catch2
   - Documents why Catch2 was chosen over Google Test, Boost.Test, doctest
   - Explains testing philosophy and coverage requirements
@@ -37,10 +37,10 @@ ADRs document both what we chose AND what we rejected (with reasoning):
 **Quick ADR search:**
 ```bash
 # Find ADRs by tag
-grep -r "tags:.*testing" alenats-main/docs/adr/
+grep -r "tags:.*testing" docs/adr/
 
 # List all accepted decisions
-grep -l "status: accepted" alenats-main/docs/adr/*.md
+grep -l "status: accepted" docs/adr/*.md
 ```
 
 ## Build Commands
