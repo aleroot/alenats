@@ -1,3 +1,11 @@
+---
+title: "ADR-0001: Testing Infrastructure and Quality Standards"
+status: accepted
+date: 2025-11-17
+tags: [testing, ci-cd, quality, catch2, github-actions, coverage, tooling]
+authors: [bjcoombs]
+---
+
 # ADR 0001: Testing Infrastructure and Quality Standards
 
 ## Status
@@ -23,11 +31,68 @@ Without these, the library risks:
 We have adopted a comprehensive testing and quality infrastructure inspired by industry best practices:
 
 ### Testing Framework: Catch2 v3
-- **Why Catch2:** Modern, header-only (easy integration), excellent C++23 support, readable test syntax
-- **Alternatives considered:**
-  - Google Test: More complex setup, older C++ standard support
-  - Boost.Test: Requires Boost dependency for tests
-  - doctest: Lighter weight but less mature ecosystem
+
+**Decision:** Use Catch2 v3 as the testing framework.
+
+**Why Catch2:**
+- Modern C++23 support (templates, concepts, coroutines)
+- Header-only library (minimal integration complexity)
+- Excellent readability (BDD-style `TEST_CASE` syntax)
+- Rich assertion macros (`REQUIRE`, `CHECK`, etc.)
+- Built-in test discovery for CTest integration
+- Active maintenance and community
+
+**Alternatives Considered:**
+
+#### Alternative 1: Google Test (gtest/gmock)
+- **Pros:**
+  - Industry standard, widely known
+  - Excellent mocking support (gmock)
+  - Mature ecosystem with extensive documentation
+  - Used by many large projects
+- **Cons:**
+  - More complex CMake integration
+  - Older C++ standard idioms (C++11 era)
+  - Verbosity in test naming (`TEST(TestSuite, TestCase)`)
+  - Heavier dependency footprint
+- **Why rejected:** Overkill for a header-only library; older C++ patterns don't match project's C++23 style
+
+#### Alternative 2: Boost.Test
+- **Pros:**
+  - Part of Boost ecosystem
+  - Good integration if already using Boost.Asio
+  - Mature and stable
+- **Cons:**
+  - Adds Boost dependency to test suite
+  - More complex setup than Catch2
+  - Less modern C++ support
+  - Project aims to support standalone Asio (no Boost requirement)
+- **Why rejected:** Contradicts goal of minimal dependencies; Boost already optional for library itself
+
+#### Alternative 3: doctest
+- **Pros:**
+  - Ultra-lightweight (fastest compilation)
+  - Catch2-like syntax (easy migration)
+  - Single header file
+  - Very fast test execution
+- **Cons:**
+  - Less mature than Catch2 (newer project)
+  - Smaller community and ecosystem
+  - Fewer advanced features (e.g., BDD sections)
+  - Less comprehensive documentation
+- **Why rejected:** While appealing for compilation speed, Catch2's maturity and features outweigh the compilation time cost for this project size
+
+#### Alternative 4: Roll-our-own test framework
+- **Pros:**
+  - Complete control over features
+  - Zero external dependencies
+  - Perfect fit for project needs
+- **Cons:**
+  - Significant development and maintenance burden
+  - Reinventing well-solved problems
+  - Missing advanced features (test discovery, fixtures, etc.)
+  - Lower contributor familiarity
+- **Why rejected:** Not a core competency of the project; well-established frameworks exist
 
 ### Test Organization
 
