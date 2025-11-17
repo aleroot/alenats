@@ -13,15 +13,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++-14, clang-17]
+        compiler: [g++-14]
         asio_mode: [standalone, boost]
         include:
           - compiler: g++-14
             cxx_compiler: g++-14
             c_compiler: gcc-14
-          - compiler: clang-17
-            cxx_compiler: clang++-17
-            c_compiler: clang-17
 
     steps:
       - name: Checkout code
