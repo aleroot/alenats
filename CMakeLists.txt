@@ -27,7 +27,7 @@ if(ASIO_STANDALONE)
     FetchContent_MakeAvailable(asio) 
 else()
     message(STATUS "Building alenats with Boost.Asio")
-    find_package(Boost 1.89.0 REQUIRED COMPONENTS system)
+    find_package(Boost 1.83.0 REQUIRED COMPONENTS system)
 endif()
 
 

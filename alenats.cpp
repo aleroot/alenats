@@ -8,7 +8,6 @@
 #include <asio/streambuf.hpp>
 #include <asio/connect.hpp>
 #include <asio/buffer.hpp>
-#include <asio/spawn.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/detached.hpp>
@@ -22,7 +21,6 @@
 #include <boost/asio/streambuf.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/buffer.hpp>
-#include <boost/asio/spawn.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/detached.hpp>
