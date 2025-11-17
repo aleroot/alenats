@@ -137,7 +137,7 @@ Tests run automatically on:
 - All pull requests
 
 **Build matrix:**
-- Ubuntu: GCC 13, Clang 16
+- Ubuntu: GCC 14, Clang 17
 - macOS: AppleClang
 - Both Boost.Asio and standalone Asio variants
 
@@ -158,15 +158,6 @@ run_io_context_for(ioc, std::chrono::milliseconds(500));
 // Longer timeout for slow operations
 run_io_context_for(ioc, std::chrono::milliseconds(2000));
 ```
-
-### Commented Out Tests
-
-Some tests are commented out because they reveal real library issues:
-
-1. **ConnectionManager lifetime issue:** Use-after-free when destroyed with pending ops
-2. **ConnectionPool timing issue:** Multiple connections created in rapid concurrent requests
-
-These are documented in the test files and should be addressed in future library improvements.
 
 ## Debugging Failed Tests
 

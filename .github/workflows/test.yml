@@ -13,15 +13,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++-13, clang-16]
+        compiler: [g++-14, clang-17]
         asio_mode: [standalone, boost]
         include:
-          - compiler: g++-13
-            cxx_compiler: g++-13
-            c_compiler: gcc-13
-          - compiler: clang-16
-            cxx_compiler: clang++-16
-            c_compiler: clang-16
+          - compiler: g++-14
+            cxx_compiler: g++-14
+            c_compiler: gcc-14
+          - compiler: clang-17
+            cxx_compiler: clang++-17
+            c_compiler: clang-17
 
     steps:
       - name: Checkout code
@@ -29,12 +29,16 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
             ninja-build \
             libssl-dev \
-            ${{ matrix.compiler }}
+            g++-14 \
+            gcc-14 \
+            clang-17 \
+            clang-tools-17
 
       - name: Install Boost (if needed)
         if: matrix.asio_mode == 'boost'
@@ -49,7 +53,8 @@ jobs:
             -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
             -DCMAKE_BUILD_TYPE=Debug \
             -DASIO_STANDALONE=ON \
-            -DBUILD_TESTS=ON
+            -DBUILD_TESTS=ON \
+            -DASIO_DISABLE_STACKFUL_COROUTINES=ON
 
       - name: Configure CMake (Boost.Asio)
         if: matrix.asio_mode == 'boost'
@@ -97,7 +102,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DASIO_STANDALONE=ON \
             -DBUILD_TESTS=ON \
-            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
+            -DASIO_DISABLE_STACKFUL_COROUTINES=ON
 
       - name: Configure CMake (Boost.Asio)
         if: matrix.asio_mode == 'boost'
@@ -126,23 +132,26 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Add PPA for newer GCC versions
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
             ninja-build \
             libssl-dev \
-            g++-13 \
+            g++-14 \
             lcov
 
       - name: Configure CMake with coverage
         run: |
           cmake -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER=g++-13 \
-            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_C_COMPILER=gcc-14 \
             -DCMAKE_BUILD_TYPE=Debug \
             -DASIO_STANDALONE=ON \
             -DBUILD_TESTS=ON \
-            -DENABLE_COVERAGE=ON
+            -DENABLE_COVERAGE=ON \
+            -DASIO_DISABLE_STACKFUL_COROUTINES=ON
 
       - name: Build
         run: cmake --build build

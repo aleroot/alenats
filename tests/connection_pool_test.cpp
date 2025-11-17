@@ -222,38 +222,32 @@ TEST_CASE("ConnectionPool: get - Concurrent requests for same key -> Returns sam
     // At least one connection should have been created
     REQUIRE(connection_id >= 1);
 }
+TEST_CASE("ConnectionPool: get - Rapid sequential requests -> Maintains consistency") {
+    asio::io_context ioc;
+    Nats::ConnectionPool<MockConnection> pool(ioc);
 
-// NOTE: This test is flaky due to timing issues in ConnectionPool.
-// When multiple rapid requests are made, the pool may create multiple connections
-// before the first one is stored in the pool map, resulting in different IDs.
-// This is expected behavior for concurrent access patterns without additional
-// synchronization at the caller level.
-//
-// TEST_CASE("ConnectionPool: get - Rapid sequential requests -> Maintains consistency") {
-//     asio::io_context ioc;
-//     Nats::ConnectionPool<MockConnection> pool(ioc);
-//
-//     int connection_id = 0;
-//     auto factory = [&connection_id]() {
-//         return std::make_shared<MockConnection>(++connection_id);
-//     };
-//
-//     std::vector<int> connection_ids;
-//
-//     for (int i = 0; i < 100; ++i) {
-//         pool.async_get_or_create("key1", factory, [&](std::shared_ptr<MockConnection> conn) {
-//             if (conn) {
-//                 connection_ids.push_back(conn->id());
-//             }
-//         });
-//     }
-//
-//     run_io_context_for(ioc, std::chrono::milliseconds(500));
-//
-//     // All callbacks should return the same connection ID
-//     REQUIRE(!connection_ids.empty());
-//     int first_id = connection_ids[0];
-//     for (int id : connection_ids) {
-//         REQUIRE(id == first_id);
-//     }
-// }
+    int connection_id = 0;
+    auto factory = [&connection_id]() {
+        return std::make_shared<MockConnection>(++connection_id);
+    };
+
+    std::vector<std::shared_ptr<MockConnection>> active_connections; 
+    std::vector<int> connection_ids;
+
+    for (int i = 0; i < 100; ++i) {
+        pool.async_get_or_create("key1", factory, [&](std::shared_ptr<MockConnection> conn) {
+            if (conn) {
+                active_connections.push_back(conn);
+                connection_ids.push_back(conn->id());
+            }
+        });
+    }
+
+    run_io_context_for(ioc, std::chrono::milliseconds(500));
+
+    REQUIRE(!connection_ids.empty());
+    int first_id = connection_ids[0];
+    for (int id : connection_ids) {
+        REQUIRE(id == first_id);
+    }
+}

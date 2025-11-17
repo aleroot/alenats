@@ -250,32 +250,26 @@ TEST_CASE("ConnectionManager: Requests to different destinations -> Creates sepa
     // Even if both are null (no server), the requests should be independent
 }
 
-// NOTE: This test reveals a real lifetime issue in the library
-// When ConnectionManager is destroyed while async operations are pending,
-// it can cause use-after-free. This is a known issue that should be fixed
-// in the library by using shared_from_this or similar patterns.
-// Commented out to avoid segfaults during CI runs.
-//
-// TEST_CASE("ConnectionManager: Manager destroyed before callbacks -> No crash or undefined behavior") {
-//     asio::io_context ioc;
-//
-//     {
-//         auto mgr = std::make_shared<Nats::ConnectionManager>(ioc);
-//
-//         mgr->async_get_connection(
-//             "localhost", "4222",
-//             std::nullopt, false,
-//             [](std::shared_ptr<Nats::Connection> conn) {
-//                 // This may or may not be called
-//             }
-//         );
-//
-//         // Manager destroyed here
-//     }
-//
-//     // Run io_context briefly
-//     run_io_context_for(ioc, std::chrono::milliseconds(100));
-//
-//     // Should not crash
-//     REQUIRE(true);
-// }
+TEST_CASE("ConnectionManager: Manager destroyed before callbacks -> No crash or undefined behavior") {
+    asio::io_context ioc;
+
+    {
+        auto mgr = std::make_shared<Nats::ConnectionManager>(ioc);
+
+        mgr->async_get_connection(
+            "localhost", "4222",
+            std::nullopt, false,
+            [](std::shared_ptr<Nats::Connection> conn) {
+                // This may or may not be called
+            }
+        );
+
+        // Manager destroyed here
+    }
+
+    // Run io_context briefly
+    run_io_context_for(ioc, std::chrono::milliseconds(100));
+
+    // Should not crash
+    REQUIRE(true);
+}

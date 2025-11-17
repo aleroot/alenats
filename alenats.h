@@ -230,14 +230,16 @@ namespace Nats {
         void async_get_or_create(
             std::string key, 
             FactoryFunc factory, 
-            HandlerFunc handler
+            HandlerFunc handler,
+            std::shared_ptr<void> anchor = nullptr
         ) {
             // Post the entire logic to the strand to ensure map access is thread-safe
             asio::post(strand_, [
                 this, 
                 key = std::move(key), 
                 factory = std::move(factory), 
-                handler = std::move(handler)
+                handler = std::move(handler),
+                anchor
             ]() mutable {
                 
                 // Check if a valid connection already exists in the pool

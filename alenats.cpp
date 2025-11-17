@@ -1204,7 +1204,8 @@ void ConnectionManager::async_get_connection(
     pimpl_->pool_.async_get_or_create(
         std::move(key),
         std::move(factory),
-        std::move(handler)
+        std::move(handler),
+        shared_from_this()
     );
 }
 
