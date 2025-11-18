@@ -44,6 +44,11 @@
 #include <istream>
 #include <unordered_map>
 #include <charconv>
+#include <random>
+#include <deque>
+#include <random>
+#include <ranges>
+#include <set>
 
 #include "simdjson.h"
 
@@ -262,6 +267,13 @@ using namespace std::literals;
 using tcp = asio::ip::tcp;
 using asio_awaitable = asio::awaitable<void, asio::any_io_executor>;
 constexpr auto use_awaitable_exec = asio::use_awaitable_t<asio::any_io_executor>{};
+
+// Helper to split "host:port" strings from INFO connect_urls
+ServerAddress parse_address_string(std::string_view addr) {
+    auto pos = addr.find_last_of(':');
+    if (pos == std::string_view::npos) return {std::string(addr), "4222"};
+    return {std::string(addr.substr(0, pos)), std::string(addr.substr(pos + 1))};
+}
 
 struct ConnectionManager::Impl {
     asio::io_context& ioc_;
@@ -492,8 +504,9 @@ public:
     std::atomic<State> state_{State::DISCONNECTED};
 
     // Connection Config
-    std::string host_;
-    std::string port_;
+    std::deque<ServerAddress> server_pool_; // Available servers for failover
+    std::string host_; // Currently active host
+    std::string port_; // Currently active port
     std::optional<Nats::Credentials> auth_;
     bool use_ssl_;
     std::shared_ptr<asio::ssl::context> ssl_ctx_;
@@ -531,8 +544,7 @@ public:
 
     void start_client(
         std::shared_ptr<NatsConnection> self,
-        const std::string& host,
-        const std::string& port,
+        std::vector<ServerAddress> servers,
         const std::optional<Nats::Credentials>& auth,
         bool use_ssl
     ) {
@@ -541,8 +553,14 @@ public:
             return; // Already started
         }
 
-        host_ = host;
-        port_ = port;
+        // Randomize seeds to prevent Thundering Herd
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::ranges::shuffle(servers, g);
+
+        // Populate the pool
+        for(auto& s : servers) server_pool_.push_back(std::move(s));
+
         auth_ = auth;
         use_ssl_ = use_ssl;
 
@@ -559,34 +577,66 @@ public:
         );
     }
 
-    asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
+asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         co_await asio::post(ioc_.get_executor(), use_awaitable_exec);
+        
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> jitter_dist(0, 100);
+
+        int cycle_count = 0; // Track attempts in current cycle
 
         while(state_.load() != State::STOPPED) {
+            if (server_pool_.empty()) {
+                 logger.error("NATS-CLIENT: No servers available in pool!");
+                 co_return;
+            }
+            
+            // Round Robin Logic
+            auto current_server = server_pool_.front();
+            server_pool_.pop_front();
+            server_pool_.push_back(current_server);
+
+            host_ = current_server.host;
+            port_ = current_server.port;
+            cycle_count++;
+
+            logger.info(std::format("NATS-CLIENT: Attempting connection to {}:{}...", host_, port_));
+
+            bool connected_successfully = false;
             try {
                 state_.store(State::CONNECTING);
                 co_await connect_and_run_session(self);
                 logger.info("NATS-CLIENT: Disconnected.");
-            } catch (const asio_system::system_error& e) {
-                // Handle asio-specific errors
-                logger.error(std::format("NATS-CLIENT: Connection error({}): {}. Retrying in 5s...", e.code().value(), e.code().message()));
-            } catch (const std::exception& e) {
-                logger.error(std::format("NATS-CLIENT: General error: {}. Retrying in 5s...", e.what()));
+                connected_successfully = true;
             } catch (...) {
-                logger.error("NATS-CLIENT: Unknown connection error. Retrying in 5s...");
+                logger.error("NATS-CLIENT: Connection failed.");
             }
 
             if (state_.load() == State::STOPPED) break;
 
+            // Cleanup
             state_.store(State::DISCONNECTED);
             ping_timer_.cancel();
             socket_.reset();
-
             co_await asio::post(strand_, use_awaitable_exec);
             fail_all_pending_writes("Disconnected");
 
-            connect_timer_.expires_after(std::chrono::seconds(5));
-            co_await connect_timer_.async_wait(use_awaitable_exec);
+            if (connected_successfully) {
+                cycle_count = 0; 
+            } 
+            
+            // Only sleep if we have tried every server in the pool
+            if (cycle_count >= server_pool_.size()) {
+                logger.error("NATS-CLIENT: Unable to connect to any server. Sleeping...");
+                cycle_count = 0; // Reset for next cycle
+                
+                auto jitter = std::chrono::milliseconds(jitter_dist(gen));
+                connect_timer_.expires_after(std::chrono::seconds(2) + jitter);
+                co_await connect_timer_.async_wait(use_awaitable_exec);
+            } else {
+                co_await asio::post(ioc_.get_executor(), use_awaitable_exec);
+            }
         }
     }
 
@@ -747,6 +797,12 @@ public:
                 case Parser::MsgType::OK:
                     logger.info("NATS-CLIENT: -> Received +OK (ignored)");
                     break;
+                case Parser::MsgType::INFO:
+                    if (header_line_str.size() > 5) {
+                        logger.info("NATS-CLIENT: Received INFO (cluster topology update)");
+                        process_info(std::string_view(header_line_str).substr(5));
+                    }
+                    break;
                 case Parser::MsgType::ERR:
                     logger.error(std::format("NATS-CLIENT: Received error: {}", header.error_msg));
                     break;
@@ -878,6 +934,28 @@ public:
             } else {
                 server_nonce_.clear();
             }
+
+            // Topology Discovery: "connect_urls"
+            simdjson::dom::array urls;
+            if (doc["connect_urls"].get_array().get(urls) == simdjson::SUCCESS) {
+                std::set<ServerAddress> known_set(server_pool_.begin(), server_pool_.end());
+                known_set.insert({host_, port_}); // Add current
+                bool new_discovered = false;
+
+                for (std::string_view url : urls) {
+                    auto addr = parse_address_string(url);
+                    if (known_set.find(addr) == known_set.end()) {
+                        server_pool_.push_back(addr); // Add to back of rotation
+                        known_set.insert(addr);
+                        new_discovered = true;
+                    }
+                }
+                
+                if(new_discovered) {
+                     logger.info(std::format("NATS-CLIENT: Cluster topology updated. Total servers in pool: {}", server_pool_.size() + 1));
+                }
+            }
+
         } catch (const std::exception& e) {
             logger.error(std::format("NATS-CLIENT: Failed to parse server INFO: {}", e.what()));
             server_nonce_.clear(); // Ensure nonce is clear on parse error
@@ -1181,21 +1259,29 @@ ConnectionManager::ConnectionManager(asio::io_context& ioc)
 ConnectionManager::~ConnectionManager() = default;
 
 void ConnectionManager::async_get_connection(
-    const std::string& host,
-    const std::string& port,
+    std::vector<ServerAddress> servers,
     const std::optional<Nats::Credentials>& auth,
     bool use_ssl,
     std::function<void(std::shared_ptr<Nats::Connection>)> handler
 ) {
-    std::string key = host + ":" + port;
-    if (auth) {
-        key += ":" + auth->username;
+    if (servers.empty()) {
+        asio::post(pimpl_->ioc_, [h=std::move(handler)]{ h(nullptr); });
+        return;
     }
+
+    // Sort seeds to create a canonical key for the pool
+    auto sorted_servers = servers;
+    std::ranges::sort(sorted_servers);
+
+    std::string key;
+    for(const auto& s : sorted_servers) key += s.host + ":" + s.port + ",";
+    
+    if (auth) key += ":" + auth->username;
     key += (use_ssl ? ":ssl" : ":tcp");
 
-    auto factory = [this, host, port, auth, use_ssl]() -> std::shared_ptr<Nats::Connection> {
+    auto factory = [this, s=std::move(servers), auth, use_ssl]() mutable -> std::shared_ptr<Nats::Connection> {
         auto conn = std::make_shared<Nats::NatsConnection>(pimpl_->ioc_);
-        conn->start_client(conn, host, port, auth, use_ssl);
+        conn->start_client(conn, std::move(s), auth, use_ssl);
         return conn;
     };
 
@@ -1205,6 +1291,17 @@ void ConnectionManager::async_get_connection(
         std::move(handler),
         shared_from_this()
     );
+}
+
+void ConnectionManager::async_get_connection(
+    const std::string& host,
+    const std::string& port,
+    const std::optional<Nats::Credentials>& auth,
+    bool use_ssl,
+    std::function<void(std::shared_ptr<Nats::Connection>)> handler
+) {
+    // Backward compatibility wrapper
+    async_get_connection({{host, port}}, auth, use_ssl, std::move(handler));
 }
 
 } // namespace Nats

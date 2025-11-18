@@ -8,6 +8,7 @@ This library provides a NATS client that supports:
 * Username/Password, Token, and NKEY authentication
 * Automatic reconnect on failure
 * Asynchronous publish and subscribe
+* Clustering
 
 ## Dependencies
 
@@ -33,14 +34,21 @@ The `ConnectionManager` is your entry point. It runs on an `asio::io_context` an
 asio::io_context ioc;
 auto conn_mgr = std::make_shared<Nats::ConnectionManager>(ioc);
 
-// Asynchronously request a connection
+std::vector<Nats::ServerAddress> cluster = {
+    {"nats-1.lan", "4222"},
+    {"nats-2.lan", "4222"},
+    {"nats-3.lan", "4222"}
+};
+
+// Asynchronously connect to the cluster
 conn_mgr->async_get_connection(
-    "demo.nats.io", "4222",  // Host and Port
-    std.nullopt,             // No auth
+    cluster,                 // The seed list
+    std::nullopt,            // No auth
     false,                   // No SSL
     [&](std::shared_ptr<Nats::Connection> conn) {
         if (conn) {
-            // You are now connected!
+            // Connected! 
+            // The client has likely already discovered the rest of the cluster nodes.
         }
     }
 );

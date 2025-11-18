@@ -11,6 +11,7 @@ add_executable(alenats_tests
     test_main.cpp
     connection_manager_test.cpp
     connection_pool_test.cpp
+    cluster_test.cpp
     subscription_test.cpp
 )
 

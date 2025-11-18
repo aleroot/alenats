@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <span>
 #include <iostream>
+#include <compare>
 
 namespace simdjson { namespace dom { class parser; class element; } }
 
@@ -51,6 +52,16 @@ namespace Nats {
     namespace asio = boost::asio;
     #endif
     using Buffer = std::vector<std::byte>;
+
+    /**
+     * @brief Represents a NATS server address.
+     */
+    struct ServerAddress {
+        std::string host;
+        std::string port;
+
+        auto operator<=>(const ServerAddress&) const = default;
+    };
 
     /**
      * @brief Authentication details for the NATS connection.
@@ -315,6 +326,16 @@ namespace Nats {
         void async_get_connection(
             const std::string& host,
             const std::string& port,
+            const std::optional<Nats::Credentials>& auth,
+            bool use_ssl,
+            std::function<void(std::shared_ptr<Nats::Connection>)> handler
+        );
+
+        /**
+         * @brief Gets or creates a shared connection using a cluster of seed servers.
+         */
+        void async_get_connection(
+            std::vector<ServerAddress> servers,
             const std::optional<Nats::Credentials>& auth,
             bool use_ssl,
             std::function<void(std::shared_ptr<Nats::Connection>)> handler
