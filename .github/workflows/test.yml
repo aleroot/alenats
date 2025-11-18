@@ -181,3 +181,51 @@ jobs:
           files: ./coverage.filtered.info
           fail_ci_if_error: false
           verbose: true
+
+  test-windows:
+    name: Windows Tests
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        asio_mode: [standalone, boost]
+        
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install OpenSSL (vcpkg)
+        run: vcpkg install openssl:x64-windows
+      - name: Install Boost (vcpkg)
+        if: matrix.asio_mode == 'boost'
+        run: vcpkg install boost-asio:x64-windows boost-system:x64-windows
+      - name: Configure CMake (Standalone Asio)
+        if: matrix.asio_mode == 'standalone'
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=ON \
+            -DBUILD_TESTS=ON \
+            -DASIO_DISABLE_STACKFUL_COROUTINES=ON
+
+      - name: Configure CMake (Boost.Asio)
+        if: matrix.asio_mode == 'boost'
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DASIO_STANDALONE=OFF \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Debug
+      - name: Run tests
+        shell: bash
+        run: |
+          export PATH="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin:$PATH"
+          cd build
+          ctest --output-on-failure --verbose -C Debug  

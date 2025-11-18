@@ -40,6 +40,7 @@ target_link_libraries(alenats
     simdjson::simdjson
     OpenSSL::SSL
     OpenSSL::Crypto
+    $<$<PLATFORM_ID:Windows>:ws2_32 Crypt32>
 )
 
 if(ASIO_STANDALONE)
