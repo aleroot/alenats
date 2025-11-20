@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ASIO_STANDALONE "Build with standalone Asio instead of Boost.Asio" OFF)
+option(ENABLE_COVERAGE "Enable code coverage generation" OFF)
 option(BUILD_TESTS "Build test suite" OFF)
 
 find_package(OpenSSL REQUIRED)
@@ -30,6 +31,14 @@ else()
     find_package(Boost 1.83.0 REQUIRED)
 endif()
 
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        add_compile_options(-fprofile-update=atomic)
+    endif()
+    
+    add_compile_options(--coverage)
+    add_link_options(--coverage)
+endif()
 
 add_library(alenats alenats.cpp alenats.h)
 target_include_directories(alenats PUBLIC 

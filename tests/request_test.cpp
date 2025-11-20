@@ -14,6 +14,7 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <mutex>
 
 using namespace TestHelpers;
 using namespace std::chrono_literals;
