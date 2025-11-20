@@ -45,15 +45,18 @@ public:
     void dispatch_packet(
         const Nats::Buffer& payload,
         std::string_view subject,
+        std::string_view reply_to, 
         const std::map<std::string, std::string>& headers) override {
         message_count++;
         last_subject = subject;
+        last_reply_to = reply_to;
         last_payload = payload;
         last_headers = headers;
     }
 
     int message_count = 0;
     std::string last_subject;
+    std::string last_reply_to;
     Nats::Buffer last_payload;
     std::map<std::string, std::string> last_headers;
 };

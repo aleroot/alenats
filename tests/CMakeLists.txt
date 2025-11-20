@@ -13,6 +13,7 @@ add_executable(alenats_tests
     connection_pool_test.cpp
     cluster_test.cpp
     subscription_test.cpp
+    request_test.cpp
 )
 
 target_link_libraries(alenats_tests

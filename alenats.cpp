@@ -8,11 +8,12 @@
 #include <asio/streambuf.hpp>
 #include <asio/connect.hpp>
 #include <asio/buffer.hpp>
+#include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/detached.hpp>
 #include <asio/use_awaitable.hpp>
-#include <asio/experimental/awaitable_operators.hpp>
+#include <asio/experimental/channel.hpp>       
 #else
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read.hpp>
@@ -21,18 +22,17 @@
 #include <boost/asio/streambuf.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/experimental/channel.hpp>    
 #endif
 
 #include <openssl/evp.h>
-#include <openssl/err.h>
 #include <array>
 #include <span>
-#include <print>
 #include <sstream>
 #include <variant>
 #include <queue>
@@ -40,7 +40,6 @@
 #include <format>
 #include <chrono>
 #include <stdexcept>
-#include <cstdlib>
 #include <istream>
 #include <unordered_map>
 #include <charconv>
@@ -275,6 +274,14 @@ ServerAddress parse_address_string(std::string_view addr) {
     return {std::string(addr.substr(0, pos)), std::string(addr.substr(pos + 1))};
 }
 
+// Helper to generate a random inbox subject
+std::string generate_inbox(std::string_view prefix = "_INBOX") {
+    thread_local std::random_device rd;
+    thread_local std::mt19937_64 gen(rd());
+    thread_local std::uniform_int_distribution<uint64_t> dist;
+    return std::format("{}.{:016X}", prefix, dist(gen));
+}
+
 struct ConnectionManager::Impl {
     asio::io_context& ioc_;
     ConnectionPool<Nats::Connection> pool_;
@@ -304,7 +311,7 @@ namespace Parser {
     };
 
     std::vector<std::string_view> split_sv(std::string_view str, std::string_view delims = " "sv) {
-        std::vector<std::string_view> output;
+        std::vector<std::string_view> output; output.reserve(4);
         size_t start = str.find_first_not_of(delims, 0);
         size_t end = 0;
         while (start != std::string_view::npos) {
@@ -475,6 +482,43 @@ public:
     }
 };
 
+class InboxMuxer : public Subscription, public std::enable_shared_from_this<InboxMuxer> {
+    std::string prefix_;
+    std::unordered_map<std::string, std::weak_ptr<Subscription>> pending_;
+    uint64_t token_counter_{0};
+
+public:
+    InboxMuxer() : prefix_(generate_inbox() + ".") {}
+
+    std::string get_wildcard_subject() const { return prefix_ + "*"; }
+
+    std::string register_request(std::weak_ptr<Subscription> sub) {
+        std::string token = std::format("{:x}", ++token_counter_);
+        pending_[token] = std::move(sub);
+        return prefix_ + token;
+    }
+
+    void remove_request(std::string_view reply_subject) {
+        if (reply_subject.size() <= prefix_.size()) return;
+        std::string token(reply_subject.substr(prefix_.size()));
+        pending_.erase(token);
+    }
+
+    void dispatch_packet(const Buffer& payload, std::string_view subject, std::string_view reply_to, const std::map<std::string, std::string>& headers) override {
+        if (subject.size() <= prefix_.size()) return;
+            std::string token(subject.substr(prefix_.size()));
+            
+        auto it = pending_.find(token);
+        if (it != pending_.end()) {
+            if (auto sub = it->second.lock()) {
+                sub->dispatch_packet(payload, subject, reply_to, headers);
+            } else {
+                pending_.erase(it);
+            }
+        }
+    }
+};
+
 
 /**
  * @class NatsConnection
@@ -494,10 +538,14 @@ public:
 
     struct PendingWrite {
         std::string subject;
+        std::string reply_to;  // For request/reply pattern
         std::map<std::string, std::string> headers;
         Buffer payload;
         PublishCallback callback;
     };
+    
+    // Lock for serializing writes to the socket
+    using WriteLock = asio::experimental::channel<void(asio_system::error_code)>;
 
     asio::io_context& ioc_;
     asio::strand<asio::io_context::executor_type> strand_;
@@ -513,27 +561,33 @@ public:
 
     // Connection State
     std::unique_ptr<UnifiedSocket> socket_;
+    // Async Mutex for socket writes: Channel with size 1 acts as a lock
+    WriteLock write_lock_;
+    
     asio::streambuf read_buf_;
     asio::steady_timer ping_timer_;
     asio::steady_timer connect_timer_;
 
     // Key: Subject, Value: List of endpoints listening
-    std::map<std::string, SubscriptionData> subscriptions_;
+    std::unordered_map<std::string, SubscriptionData> subscriptions_;
     std::queue<PendingWrite> pending_writes_;
 
     // Re-usable buffer for parsing headers
     std::string header_parse_buffer_;
-    std::map<std::string_view, std::string_view> hmsg_header_map_sv_;
-    std::map<std::string, std::string> hmsg_header_map_str_; // Backing store
     std::string server_nonce_;
     simdjson::dom::parser json_parser_;
+    std::shared_ptr<InboxMuxer> inbox_muxer_;
 
     NatsConnection(asio::io_context& ioc)
         : ioc_(ioc),
           strand_(ioc.get_executor()),
+          write_lock_(ioc, 1), // Initialize lock with buffer size 1
           ping_timer_(ioc),
           connect_timer_(ioc)
-    {}
+    {
+        inbox_muxer_ = std::make_shared<InboxMuxer>();
+        write_lock_.try_send(asio_system::error_code{});
+    }
 
     ~NatsConnection() {
         if (state_.load() != State::STOPPED) {
@@ -552,6 +606,10 @@ public:
         if (!state_.compare_exchange_strong(expected_state, State::CONNECTING)) {
             return; // Already started
         }
+        
+        // Initialize write lock
+        write_lock_.reset();
+        write_lock_.try_send(asio_system::error_code{});
 
         // Randomize seeds to prevent Thundering Herd
         std::random_device rd;
@@ -570,20 +628,36 @@ public:
             ssl_ctx_->set_verify_mode(asio::ssl::verify_peer);
         }
 
+        subscribe(inbox_muxer_->get_wildcard_subject(), inbox_muxer_);
+
         // Start the main connection loop
-        asio::co_spawn(ioc_,
+        asio::co_spawn(strand_,
             main_connection_loop(self),
             asio::detached
         );
     }
 
+    // Helper to perform thread-safe (serialized) writes
+    asio::awaitable<void> safe_write(const auto& buffers) {
+        if (!socket_) co_return;
+        co_await write_lock_.async_receive(asio::as_tuple(asio::use_awaitable));
+        if (!socket_) {
+            write_lock_.try_send(asio_system::error_code{});
+            co_return;
+        }
+        try {
+            co_await socket_->write(buffers);
+        } catch (...) {
+            write_lock_.try_send(asio_system::error_code{});
+            throw;
+        }
+        write_lock_.try_send(asio_system::error_code{});
+    }
+
 asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
-        co_await asio::post(ioc_.get_executor(), use_awaitable_exec);
-        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> jitter_dist(0, 100);
-
         int cycle_count = 0; // Track attempts in current cycle
 
         while(state_.load() != State::STOPPED) {
@@ -619,6 +693,11 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
             state_.store(State::DISCONNECTED);
             ping_timer_.cancel();
             socket_.reset();
+            
+            // Reset the write lock for the next connection attempt
+            write_lock_.reset();
+            write_lock_.try_send(asio_system::error_code{});
+            
             co_await asio::post(strand_, use_awaitable_exec);
             fail_all_pending_writes("Disconnected");
 
@@ -655,8 +734,6 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         logger.info("NATS-CLIENT: TCP connection established, waiting for INFO...");
 
         // Read the INFO message from server
-        // Important: For SSL connections, INFO comes BEFORE TLS handshake (sent in plaintext)
-        // For non-SSL, INFO is just regular data
         auto bytes_read_info = use_ssl_
             ? co_await socket_->read_until_raw(read_buf_, Parser::CRLF)
             : co_await socket_->read_until(read_buf_, Parser::CRLF);
@@ -694,15 +771,14 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         // Send CONNECT message followed by PING (to probe connection)
         const std::string connect_msg = prepare_connect_msg();
         logger.info("NATS-CLIENT: Sending CONNECT...");
-        co_await socket_->write(asio::buffer(connect_msg));
+        co_await safe_write(asio::buffer(connect_msg));
 
         // This ensures the server will respond, completing the handshake
         logger.info("NATS-CLIENT: Sending initial PING...");
         const std::string ping_msg = "PING\r\n";
-        co_await socket_->write(asio::buffer(ping_msg));
+        co_await safe_write(asio::buffer(ping_msg));
 
         // Read server responses until we get PONG (response to our PING)
-        // Server may send: +OK, PING (which we must PONG), or our PONG response
         bool handshake_complete = false;
         int max_handshake_messages = 10; // Safety limit
         int message_count = 0;
@@ -732,7 +808,7 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
                 // Server sent PING, we must respond with PONG
                 logger.info("NATS-CLIENT: Received PING, sending PONG...");
                 const std::string pong_msg = "PONG\r\n";
-                co_await socket_->write(asio::buffer(pong_msg));
+                co_await safe_write(asio::buffer(pong_msg));
                 // Continue loop to get PONG response to our PING
             } else if (response_line.starts_with("+OK")) {
                 logger.info("NATS-CLIENT: Received +OK");
@@ -767,12 +843,22 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         while (state_.load() == State::CONNECTED) {
             [[maybe_unused]] auto bytes_read_hdr = co_await socket_->read_until(read_buf_, Parser::CRLF);
             message_count++;
-            std::istream is_header(&read_buf_);
-            std::string header_line_str;
-            std::getline(is_header, header_line_str);
+            
+            auto bufs = read_buf_.data();
+            const auto begin = asio::buffers_begin(bufs);
+            const auto end = asio::buffers_end(bufs);
+            auto it = std::find(begin, end, '\n'); // Find newline
+            
+            if (it == end) 
+                 break;
+
+            std::string header_line_str(begin, it);
             if (!header_line_str.empty() && header_line_str.back() == '\r') {
                 header_line_str.pop_back();
             }
+
+            // Consume including \n
+            read_buf_.consume(std::distance(begin, it) + 1);
 
             logger.info(std::format("NATS-CLIENT: Reader loop received (msg #{}): [{}]", message_count, header_line_str));
 
@@ -817,53 +903,56 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
 
     asio_awaitable handle_ping([[maybe_unused]] std::shared_ptr<NatsConnection> self) {
         const std::string pong_msg = "PONG\r\n";
-        co_await socket_->write(asio::buffer(pong_msg));
+        co_await safe_write(asio::buffer(pong_msg));
     }
 
     asio_awaitable handle_msg(std::shared_ptr<NatsConnection> self, Parser::MsgHeader header) {
-        std::size_t payload_size = header.total_bytes;
-        std::size_t bytes_needed = payload_size + 2; // +2 for \r\n
-        std::size_t bytes_already_available = read_buf_.size();
+        const std::size_t payload_size = header.total_bytes;
+        const std::size_t bytes_needed = payload_size + 2;
+        const std::size_t bytes_already_available = read_buf_.size();
+        
         if (bytes_needed > bytes_already_available) {
-            std::size_t bytes_to_read = bytes_needed - bytes_already_available;
+            const std::size_t bytes_to_read = bytes_needed - bytes_already_available;
             co_await socket_->read_exactly(read_buf_, asio::transfer_exactly(bytes_to_read));
         }
 
         Buffer packet(payload_size);
-        read_buf_.sgetn(reinterpret_cast<char*>(packet.data()), payload_size);
-        read_buf_.consume(2); // Consume \r\n
+        asio::buffer_copy(asio::buffer(packet), read_buf_.data(), payload_size);
+        read_buf_.consume(payload_size + 2); 
 
         co_await asio::post(strand_, use_awaitable_exec);
-        hmsg_header_map_sv_.clear(); // No headers
-        dispatch_message(self, header.sid, header.subject, packet, hmsg_header_map_sv_);
+        std::map<std::string_view, std::string_view> empty_headers;
+        dispatch_message(self, header.sid, header.subject, header.reply_to.value_or(""), packet, empty_headers);
     }
 
     asio_awaitable handle_hmsg(std::shared_ptr<NatsConnection> self, Parser::MsgHeader header) {
-        std::size_t header_size = header.header_bytes;
-        std::size_t total_size = header.total_bytes;
-        std::size_t payload_size = total_size - header_size;
-        std::size_t bytes_needed = total_size + 2; // +2 for \r\n
-        std::size_t bytes_already_available = read_buf_.size();
+        const std::size_t header_size = header.header_bytes;
+        const std::size_t total_size = header.total_bytes;
+        const std::size_t payload_size = total_size - header_size;
+        const std::size_t bytes_needed = total_size + 2;
+        const std::size_t bytes_already_available = read_buf_.size();
+        
         if (bytes_needed > bytes_already_available) {
-            std::size_t bytes_to_read = bytes_needed - bytes_already_available;
+            const std::size_t bytes_to_read = bytes_needed - bytes_already_available;
             co_await socket_->read_exactly(read_buf_, asio::transfer_exactly(bytes_to_read));
         }
+        
         header_parse_buffer_.resize(header_size);
-        read_buf_.sgetn(header_parse_buffer_.data(), header_size);
+        asio::buffer_copy(asio::buffer(header_parse_buffer_), read_buf_.data(), header_size);
+        read_buf_.consume(header_size);
 
         logger.info(std::format("NATS-CLIENT: Raw headers ({} bytes): [{}]", header_size, std::string_view(header_parse_buffer_.data(), std::min(header_size, size_t(200)))));
 
-        parse_hmsg_headers(header_parse_buffer_);
+        std::map<std::string, std::string> hmsg_header_map_str;
+        std::map<std::string_view, std::string_view> hmsg_header_map_sv;
+        parse_hmsg_headers(header_parse_buffer_, hmsg_header_map_str, hmsg_header_map_sv);
 
         Buffer packet(payload_size);
-        read_buf_.sgetn(reinterpret_cast<char*>(packet.data()), payload_size);
-
+        asio::buffer_copy(asio::buffer(packet), read_buf_.data(), payload_size);
+        read_buf_.consume(payload_size + 2);
         logger.info(std::format("NATS-CLIENT: Payload ({} bytes): [{}]", payload_size, std::string(reinterpret_cast<char*>(packet.data()), std::min(payload_size, size_t(100)))));
-
-        read_buf_.consume(2); // Consume \r\n
-
         co_await asio::post(strand_, use_awaitable_exec);
-        dispatch_message(self, header.sid, header.subject, packet, hmsg_header_map_sv_);
+        dispatch_message(self, header.sid, header.subject, header.reply_to.value_or(""), packet, hmsg_header_map_sv);
     }
 
     // Helper Functions
@@ -880,7 +969,7 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
             auto req = std::move(pending_writes_.front());
             pending_writes_.pop();
             co_spawn(strand_,
-                do_publish(self, std::move(req.subject), std::move(req.headers), std::move(req.payload), std::move(req.callback)),
+                do_publish(self, std::move(req.subject), std::move(req.reply_to), std::move(req.headers), std::move(req.payload), std::move(req.callback)),
                 asio::detached
             );
         }
@@ -905,8 +994,10 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
 
             const std::string ping_msg = "PING\r\n";
             co_spawn(ioc_,
-                socket_->write(asio::buffer(ping_msg)),
-                [this, self](std::exception_ptr, std::size_t) { start_ping_timer(self); }
+                [this, ping_msg, self]() -> asio::awaitable<void> {
+                    co_await safe_write(asio::buffer(ping_msg));
+                },
+                [this, self](std::exception_ptr) { start_ping_timer(self); }
             );
         });
     }
@@ -1005,9 +1096,13 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         return std::format("CONNECT {}\r\n", ss.str());
     }
 
-    void parse_hmsg_headers(std::string_view header_data) {
-        hmsg_header_map_sv_.clear();
-        hmsg_header_map_str_.clear();
+    void parse_hmsg_headers(
+        std::string_view header_data,
+        std::map<std::string, std::string>& hmsg_header_map_str,
+        std::map<std::string_view, std::string_view>& hmsg_header_map_sv
+    ) {
+        hmsg_header_map_sv.clear();
+        hmsg_header_map_str.clear();
 
         std::stringstream ss{std::string(header_data)};
         std::string header_line;
@@ -1020,8 +1115,8 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
                 std::string_view val_sv = std::string_view(header_line).substr(pos + 1);
                 val_sv.remove_prefix(std::min(val_sv.find_first_not_of(" \t"), val_sv.length()));
 
-                auto [it, inserted] = hmsg_header_map_str_.try_emplace(std::move(key), std::string(val_sv));
-                hmsg_header_map_sv_[it->first] = it->second;
+                auto [it, inserted] = hmsg_header_map_str.try_emplace(std::move(key), std::string(val_sv));
+                hmsg_header_map_sv[it->first] = it->second;
             }
         }
     }
@@ -1030,6 +1125,7 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         [[maybe_unused]] std::shared_ptr<NatsConnection> self,
         std::string_view sid_sv,
         std::string_view subject_sv,
+        std::string_view reply_to,
         const Buffer& packet,
         const std::map<std::string_view, std::string_view>& headers
     ) {
@@ -1051,10 +1147,21 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
             header_map_owned.emplace(std::string(key), std::string(val));
         }
 
+        std::string subject_str(subject_sv);
+        std::string reply_to_str(reply_to);
         auto endpoints_copy = it->second.endpoints;
+
         for (auto& weak_ep : endpoints_copy) {
             if (auto ep = weak_ep.lock()) {
-                ep->dispatch_packet(packet, subject_sv, header_map_owned);
+                asio::post(ioc_, [
+                    ep,
+                    pkt = packet, 
+                    sub = std::move(subject_str),
+                    reply = std::move(reply_to_str),
+                    hdrs = header_map_owned // Shared copy is fine here if read-only
+                ]() {
+                    ep->dispatch_packet(pkt, sub, reply, hdrs);
+                });
             }
         }
     }
@@ -1154,15 +1261,148 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
 
             if (state_.load() != State::CONNECTED) {
                 logger.info("NATS-CLIENT: [Adapter] Queuing publish, not connected yet.");
-                pending_writes_.push({std::move(sub), std::move(hdrs), std::move(pay), std::move(cb)});
+                pending_writes_.push({std::move(sub), "", std::move(hdrs), std::move(pay), std::move(cb)});
                 return;
             }
 
             co_spawn(strand_,
-                do_publish(self, std::move(sub), std::move(hdrs), std::move(pay), std::move(cb)),
+                do_publish(self, std::move(sub), "", std::move(hdrs), std::move(pay), std::move(cb)),
                 asio::detached
             );
         });
+    }
+
+void async_request(
+        std::string subject,
+        Buffer payload,
+        std::chrono::milliseconds timeout,
+        RequestCallback handler,
+        std::map<std::string, std::string> headers,
+        std::string custom_inbox
+    ) override {
+        if (!handler) return;
+
+        asio::post(strand_, [this, self = shared_from_this(), subject = std::move(subject), payload = std::move(payload), timeout, handler = std::move(handler), headers = std::move(headers), custom_inbox = std::move(custom_inbox)]() mutable {
+            if (state_.load() == State::STOPPED) {
+                asio::post(ioc_, [h = std::move(handler)]() { h(false, Message{}, "Connection stopped"); });
+                return;
+            }
+            struct Mailbox; 
+            struct RequestState {
+                std::atomic<bool> completed{false};
+                std::optional<Message> response;
+                std::shared_ptr<asio::steady_timer> timer;
+                RequestCallback callback;
+                std::shared_ptr<Mailbox> mailbox;
+                
+                RequestState(asio::any_io_executor exec, std::chrono::milliseconds timeout, RequestCallback cb) : callback(std::move(cb)) {
+                    timer = std::make_shared<asio::steady_timer>(exec);
+                    timer->expires_after(timeout);
+                }
+
+                bool complete(bool success, Message msg, std::string error, asio::io_context& ioc) {
+                    bool expected = false;
+                    if (completed.compare_exchange_strong(expected, true)) {
+                        timer->cancel();
+                        asio::post(ioc, [cb = std::move(callback), s=success, m = std::move(msg), e = std::move(error)]() mutable {
+                            cb(s, std::move(m), e);
+                        });
+                        return true;
+                    }
+                    return false;
+                }
+            };
+
+            struct Mailbox : public Subscription, public std::enable_shared_from_this<Mailbox> {
+                std::weak_ptr<RequestState> state_;
+                asio::io_context& ioc_;
+                std::function<void()> cleanup_;
+
+                Mailbox(std::shared_ptr<RequestState> s, asio::io_context& ioc, std::function<void()> cleanup) : state_(std::move(s)), ioc_(ioc), cleanup_(std::move(cleanup)) {}
+
+                void dispatch_packet(const Buffer& p, std::string_view s, std::string_view r, const std::map<std::string, std::string>& h) override {
+                    if (auto state = state_.lock()) {
+                        state->complete(true, Message{p, h, std::string(s), std::string(r)}, "", ioc_);
+                        if (cleanup_) cleanup_();
+                    }
+                }
+            };
+
+            auto state = std::make_shared<RequestState>(strand_, timeout, std::move(handler));
+            std::string reply_subject;
+            std::shared_ptr<Mailbox> mailbox;
+
+            if (custom_inbox.empty()) {
+                mailbox = std::make_shared<Mailbox>(state, ioc_, nullptr); 
+                reply_subject = inbox_muxer_->register_request(mailbox);
+                mailbox->cleanup_ = [muxer = inbox_muxer_, reply_subject]() { muxer->remove_request(reply_subject); };
+            } else {
+                reply_subject = custom_inbox;
+                mailbox = std::make_shared<Mailbox>(state, ioc_, nullptr);
+                subscribe(reply_subject, mailbox);
+                mailbox->cleanup_ = [conn = self, w = std::weak_ptr<Subscription>(mailbox)]() { conn->unsubscribe(w); };
+            }
+
+            state->mailbox = mailbox; 
+            state->timer->async_wait([state](const asio_system::error_code& ec) {
+                if (ec) return;  // Timer was cancelled
+                if (state->complete(false, Message{}, "NATS Request timed out", static_cast<asio::io_context&>(state->timer->get_executor().context()))) {
+                    if (state->mailbox && state->mailbox->cleanup_) state->mailbox->cleanup_();
+                }
+            });
+
+            if (state_.load() != State::CONNECTED) {
+                 pending_writes_.push({std::move(subject), reply_subject, std::move(headers), std::move(payload),
+                    [state](bool success, std::string_view error) {
+                        if (!success) {
+                            state->complete(false, Message{}, std::string(error), static_cast<asio::io_context&>(state->timer->get_executor().context()));
+                            if(state->mailbox && state->mailbox->cleanup_) state->mailbox->cleanup_();
+                        }
+                    }
+                });
+            } else {
+                co_spawn(strand_, do_publish(self, std::move(subject), reply_subject, std::move(headers), std::move(payload),
+                        [state](bool success, std::string_view error) {
+                            if (!success) {
+                                state->complete(false, Message{}, std::string(error), static_cast<asio::io_context&>(state->timer->get_executor().context()));
+                                if(state->mailbox && state->mailbox->cleanup_) state->mailbox->cleanup_();
+                            }
+                        }
+                    ), asio::detached);
+            }
+        });
+    }
+
+    asio::awaitable<Message> request(
+        std::string subject,
+        Buffer payload,
+        std::chrono::milliseconds timeout,
+        std::map<std::string, std::string> headers,
+        std::string inbox
+    ) override {
+        auto ch = std::make_shared<asio::experimental::channel<
+            asio::any_io_executor,
+            void(asio_system::error_code, bool, Message, std::string)
+        >>(ioc_.get_executor(), 1);
+
+        async_request(
+            std::move(subject),
+            std::move(payload),
+            timeout,
+            [ch](bool success, Message msg, std::string_view error) {
+                ch->try_send(asio_system::error_code{}, success, std::move(msg), std::string(error));
+            },
+            std::move(headers),
+            std::move(inbox)
+        );
+
+        auto [ec, success, msg, error] = co_await ch->async_receive(asio::as_tuple(use_awaitable_exec));
+        
+        if (!success) {
+            throw std::runtime_error(error.empty() ? "Request failed" : error);
+        }
+        
+        co_return msg;
     }
 
     // Internal Publish/Subscribe Coroutines
@@ -1170,6 +1410,7 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
     asio_awaitable do_publish(
         [[maybe_unused]] std::shared_ptr<NatsConnection> self,
         std::string subject,
+        std::string reply_to,
         std::map<std::string, std::string> headers,
         Buffer payload,
         PublishCallback handler
@@ -1180,7 +1421,11 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
 
         try {
             if (headers.empty()) {
-                header_line = std::format("PUB {} {}\r\n", subject, payload.size());
+                if (reply_to.empty()) {
+                    header_line = std::format("PUB {} {}\r\n", subject, payload.size());
+                } else {
+                    header_line = std::format("PUB {} {} {}\r\n", subject, reply_to, payload.size());
+                }
                 buffers.emplace_back(asio::buffer(header_line));
                 buffers.emplace_back(asio::buffer(payload));
             } else {
@@ -1192,19 +1437,24 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
                 ss << "\r\n";
                 header_blob = ss.str();
 
-                size_t total_payload_size = header_blob.length() + payload.size();
-                header_line = std::format("HPUB {} {} {}\r\n", subject, header_blob.length(), total_payload_size);
+                size_t total_size = header_blob.length() + payload.size();
+                
+                // HPUB <subject> [reply-to] <header-len> <total-len>\r\n
+                if (reply_to.empty()) {
+                    header_line = std::format("HPUB {} {} {}\r\n", subject, header_blob.length(), total_size);
+                } else {
+                    header_line = std::format("HPUB {} {} {} {}\r\n", subject, reply_to, header_blob.length(), total_size);
+                }
 
                 buffers.emplace_back(asio::buffer(header_line));
                 buffers.emplace_back(asio::buffer(header_blob));
                 buffers.emplace_back(asio::buffer(payload));
             }
 
-            // Add final CRLF
             static const std::string final_crlf = "\r\n";
             buffers.emplace_back(asio::buffer(final_crlf));
-
-            co_await socket_->write(buffers);
+            
+            co_await safe_write(buffers);
             if(handler) asio::post(ioc_, [cb = std::move(handler)]{ cb(true, ""); });
 
         } catch (const std::exception& e) {
@@ -1214,14 +1464,14 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         }
     }
 
-    asio_awaitable do_subscribe([[maybe_unused]] std::shared_ptr<NatsConnection> self, const std::string& subject) {
+    asio_awaitable do_subscribe([[maybe_unused]] std::shared_ptr<NatsConnection> self, std::string subject) {
         try {
             auto& sub_data = subscriptions_.at(subject);
             std::string sub_msg = std::format("SUB {} {}\r\n", subject, subject); // Using subject as SID
 
             logger.info(std::format("NATS-CLIENT: Sending SUB command: [{}]", sub_msg.substr(0, sub_msg.length()-2)));
 
-            co_await socket_->write(asio::buffer(sub_msg));
+            co_await safe_write(asio::buffer(sub_msg));
             sub_data.active = true;
             logger.info(std::format("NATS-CLIENT: [Adapter] Subscribed to {}", subject));
             logger.info(std::format("NATS-CLIENT: subscriptions_ now contains {} entries", subscriptions_.size()));
@@ -1236,10 +1486,10 @@ asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         }
     }
 
-    asio_awaitable do_unsubscribe([[maybe_unused]] std::shared_ptr<NatsConnection> self, const std::string& subject) {
+    asio_awaitable do_unsubscribe([[maybe_unused]] std::shared_ptr<NatsConnection> self, std::string subject) {
         try {
             std::string unsub_msg = std::format("UNSUB {}\r\n", subject); // Using subject as SID
-            co_await socket_->write(asio::buffer(unsub_msg));
+            co_await safe_write(asio::buffer(unsub_msg));
             logger.info(std::format("NATS-CLIENT: [Adapter] Unsubscribed from {}", subject));
         } catch (const std::exception& e) {
             logger.error(std::format("NATS-CLIENT: Unsubscribe error: {}", e.what()));
@@ -1302,6 +1552,36 @@ void ConnectionManager::async_get_connection(
 ) {
     // Backward compatibility wrapper
     async_get_connection({{host, port}}, auth, use_ssl, std::move(handler));
+}
+
+asio::awaitable<std::shared_ptr<Nats::Connection>> ConnectionManager::connect(
+    std::vector<ServerAddress> servers,
+    const std::optional<Nats::Credentials>& auth,
+    bool use_ssl
+) {
+    auto ch = std::make_shared<asio::experimental::channel<
+        asio::any_io_executor, 
+        void(asio_system::error_code, std::shared_ptr<Nats::Connection>)
+    >>(pimpl_->ioc_.get_executor(), 1);
+
+    // Call the existing callback-based implementation
+    async_get_connection(std::move(servers), auth, use_ssl, 
+        [ch](std::shared_ptr<Nats::Connection> conn) {
+            if (conn) {
+                ch->try_send(asio_system::error_code{}, conn);
+            } else {
+                ch->try_send(asio::error::connection_refused, nullptr);
+            }
+        }
+    );
+
+
+    auto [ec, conn] = co_await ch->async_receive(asio::as_tuple(use_awaitable_exec));
+    if (ec) {
+        throw asio_system::system_error(ec, "Failed to establish NATS connection");
+    }
+
+    co_return conn;
 }
 
 } // namespace Nats

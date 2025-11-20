@@ -9,6 +9,7 @@ This library provides a NATS client that supports:
 * Automatic reconnect on failure
 * Asynchronous publish and subscribe
 * Clustering
+* Inbox Request/Response
 
 ## Dependencies
 
@@ -79,6 +80,30 @@ conn->async_publish(
 
 To subscribe, implement the `Nats::Subscription` interface and pass a `weak_ptr` to your object.
 
+### 4\. Inbox Request/Response
+
+Performing an inbox request:
+
+```cpp
+asio::awaitable<void> example() {
+    auto executor = co_await asio::this_coro::executor;
+    asio::io_context& ioc = executor.context();
+    
+    auto mgr = std::make_shared<Nats::ConnectionManager>(ioc);
+    auto conn = co_await mgr->connect({"demo.nats.io", "4222"});
+    
+    std::println("Connected to NATS!");
+
+    auto reply = co_await conn->request(
+        "demo.help",
+        Nats::to_buffer("Hi!"),
+        std::chrono::seconds(5)
+    );
+    
+    std::println("Got reply: {}", Nats::view_string(reply.payload));
+}
+```
+
 ## Running the Examples
 
 The `examples/` directory provides complete, runnable programs. You can build and run them directly using CMake.
@@ -91,6 +116,7 @@ cmake --build build
 
 ./build/examples/subscribe
 ./build/examples/publish
+./build/examples/request
 ```
 
 ## Integrating with Your Project

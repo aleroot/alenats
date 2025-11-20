@@ -29,6 +29,7 @@ public:
     void dispatch_packet(
         const Nats::Buffer& packet, 
         std::string_view subject,
+        std::string_view reply_to,
         const std::map<std::string, std::string>& headers
     ) override {
         std::string payload(
@@ -39,6 +40,10 @@ public:
             "==> Received message on subject [{}]:",
             subject
         );
+
+        if (!reply_to.empty()) {
+            std::println("  Reply-To: {}", reply_to);
+        }
         
         if (!headers.empty()) {
             std::println("  Headers:");

@@ -19,6 +19,7 @@
 #include <asio/io_context.hpp>
 #include <asio/strand.hpp>
 #include <asio/post.hpp>
+#include <asio/awaitable.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/ssl.hpp>
 #include <asio/steady_timer.hpp>
@@ -26,6 +27,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -81,6 +83,21 @@ namespace Nats {
         CONNECTING,
         CONNECTED,
         STOPPED
+    };
+
+    /**
+     * @brief A NATS message container.
+     */
+    struct Message {
+        Buffer payload;
+        std::map<std::string, std::string> headers;
+        std::string subject;
+        std::string reply_to;
+
+        // Helper to check for NATS Status headers (e.g. 503 No Responders)
+        bool has_error() const {
+            return headers.contains("Status") && headers.at("Status") != "200";
+        }
     };
 
     /**
@@ -140,11 +157,13 @@ namespace Nats {
          * @brief Called by the NatsConnection when a message arrives.
          * @param packet The message payload.
          * @param subject The full NATS subject the message arrived on.
+         * @param reply_to The reply-to subject (if any), otherwise empty.
          * @param headers The map of headers (owned strings).
          */
         virtual void dispatch_packet(
             const Buffer& packet, 
             std::string_view subject,
+            std::string_view reply_to,
             const std::map<std::string, std::string>& headers
         ) = 0;
     };
@@ -195,6 +214,56 @@ namespace Nats {
             std::function<void(bool success, std::string_view error)> handler
         ) = 0;
 
+        /**
+         * @brief Callback-based request handler type.
+         * Called with either (success=true, message, "") or (success=false, {}, error_msg).
+         */
+        using RequestCallback = std::function<void(bool success, Message message, std::string_view error)>;
+
+        /**
+         * @brief Sends a request and asynchronously waits for a reply (Callback-based).
+         * Creates a subscription (mailbox), sends the request, and invokes the handler
+         * when a reply arrives or the timeout occurs.
+         * 
+         * This properly coordinates with connection state through the strand, ensuring
+         * the request is only sent when the connection is ready.
+         * 
+         * @param subject The subject to send the request to.
+         * @param payload The request data.
+         * @param timeout How long to wait for a reply.
+         * @param handler Callback invoked with the result.
+         * @param headers Optional headers.
+         * @param inbox Optional custom subject for the reply. If empty, a random one is generated.
+         */
+        virtual void async_request(
+            std::string subject,
+            Buffer payload,
+            std::chrono::milliseconds timeout,
+            RequestCallback handler,
+            std::map<std::string, std::string> headers = {},
+            std::string inbox = "" 
+        ) = 0;
+
+        /**
+         * @brief Coroutine wrapper for async_request.
+         * Provides a convenient awaitable interface while using the callback-based
+         * implementation underneath for proper strand coordination.
+         * 
+         * @param subject The subject to send the request to.
+         * @param payload The request data.
+         * @param timeout How long to wait for a reply.
+         * @param headers Optional headers.
+         * @param inbox Optional custom subject for the reply.
+         * @return An awaitable yielding the reply Message.
+         * @throws std::runtime_error on timeout or error.
+         */
+        virtual asio::awaitable<Message> request(
+            std::string subject,
+            Buffer payload,
+            std::chrono::milliseconds timeout,
+            std::map<std::string, std::string> headers = {},
+            std::string inbox = "" 
+        ) = 0;  
 
         /**
          * @brief Gets the executor (strand) for this connection.
@@ -339,6 +408,15 @@ namespace Nats {
             const std::optional<Nats::Credentials>& auth,
             bool use_ssl,
             std::function<void(std::shared_ptr<Nats::Connection>)> handler
+        );
+
+        /**
+         * @brief Coroutine-based connection establishment.
+         */
+        asio::awaitable<std::shared_ptr<Nats::Connection>> connect(
+            std::vector<ServerAddress> servers,
+            const std::optional<Nats::Credentials>& auth = std::nullopt,
+            bool use_ssl = false
         );
 
     private:

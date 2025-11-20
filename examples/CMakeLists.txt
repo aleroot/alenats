@@ -17,3 +17,9 @@ target_link_libraries(publish
   PRIVATE
   alenats
 )
+
+add_executable(request request.cpp)
+target_link_libraries(request
+  PRIVATE
+  alenats
+)

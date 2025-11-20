@@ -14,8 +14,7 @@ TEST_CASE("Subscription: MockSubscriber receives message -> dispatch_packet call
     std::map<std::string, std::string> headers{{"key1", "value1"}};
 
     auto buffer = to_buffer(payload);
-
-    subscriber->dispatch_packet(buffer, subject, headers);
+    subscriber->dispatch_packet(buffer, subject, "", headers);
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_subject == subject);
@@ -27,7 +26,7 @@ TEST_CASE("Subscription: Multiple messages -> Counts correctly") {
     auto subscriber = std::make_shared<MockSubscriber>();
 
     for (int i = 0; i < 10; ++i) {
-        subscriber->dispatch_packet(to_buffer("message"), "subject", {});
+        subscriber->dispatch_packet(to_buffer("message"), "subject", "", {});
     }
 
     REQUIRE(subscriber->message_count == 10);
@@ -37,7 +36,7 @@ TEST_CASE("Subscription: Message with empty payload -> Handled correctly") {
     auto subscriber = std::make_shared<MockSubscriber>();
 
     Nats::Buffer empty_buffer;
-    subscriber->dispatch_packet(empty_buffer, "test.subject", {});
+    subscriber->dispatch_packet(empty_buffer, "test.subject", "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_payload.empty());
@@ -51,7 +50,7 @@ TEST_CASE("Subscription: Message with headers -> Headers preserved") {
         {"X-Custom-Header", "custom-value"}
     };
 
-    subscriber->dispatch_packet(to_buffer("data"), "test.subject", headers);
+    subscriber->dispatch_packet(to_buffer("data"), "test.subject", "", headers);
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_headers.size() == 2);
@@ -66,7 +65,7 @@ TEST_CASE("Subscription: Message with headers -> Headers preserved") {
 TEST_CASE("Subscription: Empty subject -> Still processed") {
     auto subscriber = std::make_shared<MockSubscriber>();
 
-    subscriber->dispatch_packet(to_buffer("data"), "", {});
+    subscriber->dispatch_packet(to_buffer("data"), "", "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_subject.empty());
@@ -76,7 +75,7 @@ TEST_CASE("Subscription: Subject with special characters -> Preserved correctly"
     auto subscriber = std::make_shared<MockSubscriber>();
 
     std::string special_subject = "test.*.wildcard.>";
-    subscriber->dispatch_packet(to_buffer("data"), special_subject, {});
+    subscriber->dispatch_packet(to_buffer("data"), special_subject, "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_subject == special_subject);
@@ -86,7 +85,7 @@ TEST_CASE("Subscription: Empty headers map -> No crash") {
     auto subscriber = std::make_shared<MockSubscriber>();
 
     std::map<std::string, std::string> empty_headers;
-    subscriber->dispatch_packet(to_buffer("data"), "test.subject", empty_headers);
+    subscriber->dispatch_packet(to_buffer("data"), "test.subject", "", empty_headers);
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_headers.empty());
@@ -103,7 +102,7 @@ TEST_CASE("Subscription: Large payload -> Handled correctly") {
     std::string large_payload(1024 * 1024, 'A');
     auto buffer = to_buffer(large_payload);
 
-    subscriber->dispatch_packet(buffer, "test.subject", {});
+    subscriber->dispatch_packet(buffer, "test.subject", "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_payload.size() == large_payload.size());
@@ -118,7 +117,7 @@ TEST_CASE("Subscription: Binary payload (non-UTF8) -> Preserved correctly") {
         std::byte{0x00}, std::byte{0x01}, std::byte{0x02}
     };
 
-    subscriber->dispatch_packet(binary_payload, "binary.subject", {});
+    subscriber->dispatch_packet(binary_payload, "binary.subject", "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_payload == binary_payload);
@@ -133,7 +132,7 @@ TEST_CASE("Subscription: Subject with maximum length -> Handled correctly") {
         long_subject += ".segment" + std::to_string(i);
     }
 
-    subscriber->dispatch_packet(to_buffer("data"), long_subject, {});
+    subscriber->dispatch_packet(to_buffer("data"), long_subject, "", {});
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_subject == long_subject);
@@ -147,7 +146,7 @@ TEST_CASE("Subscription: Headers with empty values -> Preserved") {
         {"NormalKey", "value"}
     };
 
-    subscriber->dispatch_packet(to_buffer("data"), "test.subject", headers);
+    subscriber->dispatch_packet(to_buffer("data"), "test.subject", "", headers);
 
     REQUIRE(subscriber->message_count == 1);
     REQUIRE(subscriber->last_headers.at("EmptyValue") == "");
@@ -165,7 +164,7 @@ TEST_CASE("Subscription: Rapid sequential messages -> All processed correctly") 
 
     for (int i = 0; i < num_messages; ++i) {
         std::string payload = "Message " + std::to_string(i);
-        subscriber->dispatch_packet(to_buffer(payload), "test.subject", {});
+        subscriber->dispatch_packet(to_buffer(payload), "test.subject", "", {});
     }
 
     REQUIRE(subscriber->message_count == num_messages);
@@ -175,9 +174,9 @@ TEST_CASE("Subscription: Multiple subscribers -> Independent state") {
     auto sub1 = std::make_shared<MockSubscriber>();
     auto sub2 = std::make_shared<MockSubscriber>();
 
-    sub1->dispatch_packet(to_buffer("msg1"), "subject1", {});
-    sub2->dispatch_packet(to_buffer("msg2"), "subject2", {});
-    sub1->dispatch_packet(to_buffer("msg3"), "subject1", {});
+    sub1->dispatch_packet(to_buffer("msg1"), "subject1", "", {});
+    sub2->dispatch_packet(to_buffer("msg2"), "subject2", "", {});
+    sub1->dispatch_packet(to_buffer("msg3"), "subject1", "", {});
 
     REQUIRE(sub1->message_count == 2);
     REQUIRE(sub2->message_count == 1);
@@ -195,7 +194,8 @@ TEST_CASE("Subscription: Subscriber destroyed mid-operation -> Safe with weak_pt
 
         REQUIRE(!weak_sub.expired());
 
-        subscriber->dispatch_packet(to_buffer("data"), "test.subject", {});
+        // Fixed call signature
+        subscriber->dispatch_packet(to_buffer("data"), "test.subject", "", {});
         REQUIRE(subscriber->message_count == 1);
 
         // Subscriber destroyed here
@@ -216,8 +216,22 @@ TEST_CASE("Subscription: Different payload sizes -> All handled correctly") {
 
     for (size_t size : sizes) {
         std::string payload(size, 'X');
-        subscriber->dispatch_packet(to_buffer(payload), "test.subject", {});
+        // Fixed call signature
+        subscriber->dispatch_packet(to_buffer(payload), "test.subject", "", {});
     }
 
     REQUIRE(subscriber->message_count == sizes.size());
+}
+
+TEST_CASE("Subscription: Reply-To field -> Preserved correctly") {
+    auto subscriber = std::make_shared<MockSubscriber>();
+    
+    std::string subject = "test.request";
+    std::string reply_to = "_INBOX.12345";
+    
+    subscriber->dispatch_packet(to_buffer("help"), subject, reply_to, {});
+    
+    REQUIRE(subscriber->message_count == 1);
+    REQUIRE(subscriber->last_subject == subject);
+    REQUIRE(subscriber->last_reply_to == reply_to);
 }
