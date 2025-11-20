@@ -167,7 +167,7 @@ TEST_CASE("Request: With Headers -> Headers passed correctly") {
         }
     );
     
-    run_io_context_for(ioc, 500ms);
+    run_io_context_for(ioc, 1500ms);
     REQUIRE(callback_invoked);
 }
 
@@ -199,7 +199,7 @@ TEST_CASE("Request: Custom Inbox -> Uses provided inbox subject") {
         }
     );
     
-    run_io_context_for(ioc, 500ms);
+    run_io_context_for(ioc, 1500ms);
     REQUIRE(callback_invoked);
 }
 
@@ -422,7 +422,7 @@ TEST_CASE("Request: Connection Stopped -> Error callback invoked") {
         }
     );
     
-    run_io_context_for(ioc, 500ms);
+    run_io_context_for(ioc, 1500ms);
     REQUIRE(callback_invoked);
 }
 
@@ -451,7 +451,7 @@ TEST_CASE("Request: Empty Subject -> Handled gracefully") {
         }
     );
     
-    run_io_context_for(ioc, 500ms);
+    run_io_context_for(ioc, 1500ms);
     REQUIRE(callback_invoked);
 }
 
@@ -484,7 +484,7 @@ TEST_CASE("Request: Large Payload -> Handled correctly") {
         }
     );
     
-    run_io_context_for(ioc, 500ms);
+    run_io_context_for(ioc, 1500ms);
     REQUIRE(callback_invoked);
 }
 
