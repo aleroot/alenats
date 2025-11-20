@@ -543,10 +543,33 @@ public:
         Buffer payload;
         PublishCallback callback;
     };
-    
+
     // Lock for serializing writes to the socket
     using WriteLock = asio::experimental::channel<void(asio_system::error_code)>;
 
+    struct AsyncLockGuard {
+        WriteLock& channel;
+        bool acquired = false;
+
+        AsyncLockGuard(WriteLock& ch) : channel(ch) {}
+        AsyncLockGuard(const AsyncLockGuard&) = delete;
+        AsyncLockGuard(AsyncLockGuard&& other) noexcept 
+            : channel(other.channel), acquired(other.acquired) {
+            other.acquired = false;
+        }
+
+        ~AsyncLockGuard() {
+            if (acquired) {
+                channel.try_send(std::error_code{}); // Return the token to the channel
+            }
+        }
+
+        asio::awaitable<void> acquire() {
+            co_await channel.async_receive(asio::use_awaitable);
+            acquired = true;
+        }
+    };
+    
     asio::io_context& ioc_;
     asio::strand<asio::io_context::executor_type> strand_;
     std::atomic<State> state_{State::DISCONNECTED};
@@ -639,22 +662,14 @@ public:
 
     // Helper to perform thread-safe (serialized) writes
     asio::awaitable<void> safe_write(const auto& buffers) {
-        if (!socket_) co_return;
-        co_await write_lock_.async_receive(asio::as_tuple(asio::use_awaitable));
-        if (!socket_) {
-            write_lock_.try_send(asio_system::error_code{});
-            co_return;
-        }
-        try {
-            co_await socket_->write(buffers);
-        } catch (...) {
-            write_lock_.try_send(asio_system::error_code{});
-            throw;
-        }
-        write_lock_.try_send(asio_system::error_code{});
+        AsyncLockGuard guard(write_lock_);
+        co_await guard.acquire();
+        
+        if (!socket_) co_return; 
+        co_await socket_->write(buffers);
     }
 
-asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
+    asio_awaitable main_connection_loop(std::shared_ptr<NatsConnection> self) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> jitter_dist(0, 100);
